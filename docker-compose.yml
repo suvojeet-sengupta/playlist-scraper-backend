@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  # ── Python Scraper Service ─────────────────────────────────────────
+  scraper-service:
+    build:
+      context: ./scraper-service
+      dockerfile: Dockerfile
+    container_name: playlist-scraper
+    ports:
+      - '3011:3011'
+    env_file:
+      - ./scraper-service/.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=3011
+    restart: unless-stopped
+
+  # ── NestJS API Gateway ─────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: playlist-api-gateway
+    ports:
+      - '3010:3010'
+    env_file:
+      - ./api-gateway/.env
+    environment:
+      - PORT=3010
+      - SCRAPER_SERVICE_URL=http://scraper-service:3011
+      - NODE_ENV=production
+    depends_on:
+      - scraper-service
+    restart: unless-stopped

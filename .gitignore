@@ -1,0 +1,33 @@
+# Root
+.DS_Store
+.env
+
+# Node / NestJS
+node_modules/
+dist/
+coverage/
+npm-debug.log
+yarn-error.log
+.nestjs/
+
+# Python / FastAPI
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+env/
+.venv/
+.tox/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project
+scraper-service/.env
+api-gateway/.env
