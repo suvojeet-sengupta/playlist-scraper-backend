@@ -55,9 +55,9 @@ class SpotifyScraper(BaseScraper):
     async def scrape_playlist(self, playlist_id: str) -> PlaylistResponse:
         """Fetch full playlist data by scraping Spotify public pages."""
         start = time.perf_counter()
-        logger.info("Scraping Spotify playlist %s (Unofficial)", playlist_id)
+        logger.info("Scraping Spotify playlist %s (Unofficial Embed)", playlist_id)
 
-        url = f"https://open.spotify.com/playlist/{playlist_id}"
+        url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
         }
@@ -71,42 +71,37 @@ class SpotifyScraper(BaseScraper):
 
             html = response.text
 
-        match = re.search(r'<script id="initialState" type="text/plain">(.*?)</script>', html)
+        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html)
         if not match:
             raise RuntimeError("Failed to extract Spotify payload. The page structure might have changed.")
 
         try:
-            payload = json.loads(base64.b64decode(match.group(1)).decode("utf-8"))
+            payload = json.loads(match.group(1))
         except Exception as e:
             raise RuntimeError(f"Failed to decode Spotify payload: {e}")
 
-        entities = payload.get("entities", {}).get("items", {})
-        playlist_key = f"spotify:playlist:{playlist_id}"
-        if playlist_key not in entities:
+        entity = payload.get("props", {}).get("pageProps", {}).get("state", {}).get("data", {}).get("entity", {})
+        if not entity:
             raise ValueError(f"Playlist data missing in payload for ID: {playlist_id}")
 
-        raw_playlist = entities[playlist_key]
+        raw_playlist = entity
         
         # ── Playlist metadata ────────────────────────────────────────
         playlist_info = self._build_playlist_info(raw_playlist, playlist_id)
 
         # ── Tracks ───────────────────────────────────────────────────
         tracks: list[Track] = []
-        content = raw_playlist.get("content", {})
-        items = content.get("items", [])
+        track_list = raw_playlist.get("trackList", [])
         
-        for item in items:
+        for i, item in enumerate(track_list):
             try:
-                track_data = item.get("itemV2", {}).get("data", {})
-                if not track_data or track_data.get("__typename") != "Track":
-                    continue
-                tracks.append(self._build_track(track_data))
+                tracks.append(self._build_track(item, i + 1))
             except Exception:
                 logger.warning("Skipping malformed track in payload", exc_info=True)
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         logger.info(
-            "Scraped %d tracks from '%s' in %d ms (Unofficial)",
+            "Scraped %d tracks from '%s' in %d ms (Unofficial Embed)",
             len(tracks),
             playlist_info.name,
             elapsed_ms,
@@ -125,70 +120,53 @@ class SpotifyScraper(BaseScraper):
 
     @staticmethod
     def _build_playlist_info(raw: dict, playlist_id: str) -> PlaylistInfo:
-        images = raw.get("images", {}).get("items", [])
-        image_url = images[0].get("sources", [{}])[0].get("url") if images else None
+        images = raw.get("coverArt", {}).get("sources", [])
+        image_url = images[0].get("url") if images else None
         
         return PlaylistInfo(
-            name=Sanitizer.clean_text(raw.get("name", "")) or "Untitled",
-            description=Sanitizer.clean_text(raw.get("description")),
-            owner=raw.get("ownerV2", {}).get("data", {}).get("name"),
+            name=Sanitizer.clean_text(raw.get("title", "")) or "Untitled",
+            description=Sanitizer.clean_text(raw.get("subtitle")),
+            owner="Spotify" if "Spotify" in str(raw.get("subtitle", "")) else None,
             platform="spotify",
             platform_id=playlist_id,
             url=f"https://open.spotify.com/playlist/{playlist_id}",
             image_url=image_url,
-            total_tracks=raw.get("content", {}).get("totalCount", 0),
-            followers=raw.get("followers"),
+            total_tracks=len(raw.get("trackList", [])),
+            followers=None,
         )
 
     @staticmethod
-    def _build_track(raw: dict) -> Track:
+    def _build_track(raw: dict, track_number: int) -> Track:
         # Artists
         artists: list[Artist] = []
-        raw_artists = raw.get("artists", {}).get("items", [])
-        for a in raw_artists:
-            uri = a.get("uri", "")
-            artist_id = uri.split(":")[-1] if uri else None
-            artists.append(
-                Artist(
-                    name=Sanitizer.clean_text(a.get("profile", {}).get("name", "")) or "Unknown",
-                    id=artist_id,
-                    url=f"https://open.spotify.com/artist/{artist_id}" if artist_id else None,
-                    image_url=None,
+        subtitle = raw.get("subtitle", "")
+        if subtitle:
+            artist_names = [a.strip() for a in re.split(r',|\u00a0', subtitle) if a.strip()]
+            for name in artist_names:
+                artists.append(
+                    Artist(
+                        name=Sanitizer.clean_text(name),
+                        id=None,
+                        url=None,
+                        image_url=None,
+                    )
                 )
-            )
 
-        # Album
-        album: Album | None = None
-        raw_album = raw.get("albumOfTrack", {})
-        if raw_album:
-            uri = raw_album.get("uri", "")
-            album_id = uri.split(":")[-1] if uri else None
-            cover_sources = raw_album.get("coverArt", {}).get("sources", [])
-            album = Album(
-                name=Sanitizer.clean_text(raw_album.get("name", "")) or "Unknown",
-                id=album_id,
-                url=f"https://open.spotify.com/album/{album_id}" if album_id else None,
-                image_url=cover_sources[0].get("url") if cover_sources else None,
-                release_date=None,  # Not reliably available in web payload
-                total_tracks=None,
-            )
-
-        # Duration
-        duration_ms = raw.get("duration", {}).get("totalMilliseconds", 0)
+        duration_ms = raw.get("duration", 0)
         
         uri = raw.get("uri", "")
         track_id = uri.split(":")[-1] if uri else ""
 
         return Track(
-            title=Sanitizer.clean_text(raw.get("name", "")) or "Untitled",
+            title=Sanitizer.clean_text(raw.get("title", "")) or "Untitled",
             artists=artists,
-            album=album,
+            album=None,
             duration_ms=duration_ms,
             duration_formatted=Sanitizer.format_duration(duration_ms),
-            isrc=None, # ISRC not exposed in unauthenticated payload
-            track_number=raw.get("trackNumber"),
-            explicit=raw.get("contentRating", {}).get("label") == "EXPLICIT",
-            preview_url=raw.get("previews", {}).get("audioPreviews", {}).get("items", [{}])[0].get("url"),
+            isrc=None,
+            track_number=track_number,
+            explicit=raw.get("isExplicit", False),
+            preview_url=raw.get("audioPreview", {}).get("url") if raw.get("audioPreview") else None,
             external_url=f"https://open.spotify.com/track/{track_id}" if track_id else None,
             platform_id=track_id,
             platform="spotify",
